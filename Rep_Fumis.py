@@ -111,18 +111,9 @@ def save_chart_mpl(fig):
         return tmp.name
 
 # ==========================================
-# 3. EXTRACCIÓN DE BASE DE DATOS (Adaptado para Streamlit Secrets)
+# 3. EXTRACCIÓN DE BASE DE DATOS
 # ==========================================
-def get_piezas_h():
-    url = "https://docs.google.com/spreadsheets/d/1mLnIC8B7mwmFZwthO0A32H3ZFfXSKt7vIUMBXEZxDJ0/export?format=csv&gid=0"
-    try:
-        df_h = pd.read_csv(url, header=None)
-        piezas = df_h.iloc[:, 0].dropna().astype(str).str.strip().tolist()
-        return [p for p in piezas if p and p.lower() not in ['codigo', 'código', 'pieza', 'piezas']]
-    except:
-        return []
-
-def fetch_data_from_db(fecha_ini, fecha_fin, mes, anio, lista_piezas_h=None):
+def fetch_data_from_db(fecha_ini, fecha_fin, mes, anio):
     try:
         # Se conecta usando los secrets configurados en Streamlit
         conexion = pymssql.connect(
@@ -133,15 +124,9 @@ def fetch_data_from_db(fecha_ini, fecha_fin, mes, anio, lista_piezas_h=None):
             login_timeout=15
         )
         
-        prod_where = ""
-        if lista_piezas_h:
-            piezas_str = ", ".join([f"'{p}'" for p in lista_piezas_h])
-            prod_where = f" AND (pr.Code NOT IN ({piezas_str}) OR pr.Code IS NULL) "
-            q_trend_piezas = f"SELECT p.Month, c.Name as Máquina, SUM(COALESCE(p.Good, 0)) as Buenas, SUM(COALESCE(p.Rework, 0)) as Retrabajo, SUM(COALESCE(p.Scrap, 0)) as Observadas, SUM(COALESCE(p.Good, 0) + COALESCE(p.Rework, 0) + COALESCE(p.Scrap, 0)) as Totales FROM PROD_M_01 p JOIN CELL c ON p.CellId = c.CellId LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Year = {anio} AND p.Month <= {mes} {prod_where} GROUP BY p.Month, c.Name"
-        else:
-            q_trend_piezas = f"SELECT p.Month, c.Name as Máquina, SUM(COALESCE(p.Good, 0)) as Buenas, SUM(COALESCE(p.Rework, 0)) as Retrabajo, SUM(COALESCE(p.Scrap, 0)) as Observadas, SUM(COALESCE(p.Good, 0) + COALESCE(p.Rework, 0) + COALESCE(p.Scrap, 0)) as Totales FROM PROD_M_03 p JOIN CELL c ON p.CellId = c.CellId WHERE p.Year = {anio} AND p.Month <= {mes} GROUP BY p.Month, c.Name"
-
-        q_piezas = f"SELECT c.Name as Máquina, COALESCE(pr.Code, 'S/C') as Pieza, SUM(COALESCE(p.Scrap, 0)) as Scrap, SUM(COALESCE(p.Rework, 0)) as RT FROM PROD_M_01 p JOIN CELL c ON p.CellId = c.CellId LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Year = {anio} AND p.Month = {mes} {prod_where} GROUP BY c.Name, pr.Code"
+        # Sin filtro de piezas H, usamos M03 directamente
+        q_trend_piezas = f"SELECT p.Month, c.Name as Máquina, SUM(COALESCE(p.Good, 0)) as Buenas, SUM(COALESCE(p.Rework, 0)) as Retrabajo, SUM(COALESCE(p.Scrap, 0)) as Observadas, SUM(COALESCE(p.Good, 0) + COALESCE(p.Rework, 0) + COALESCE(p.Scrap, 0)) as Totales FROM PROD_M_03 p JOIN CELL c ON p.CellId = c.CellId WHERE p.Year = {anio} AND p.Month <= {mes} GROUP BY p.Month, c.Name"
+        q_piezas = f"SELECT c.Name as Máquina, COALESCE(pr.Code, 'S/C') as Pieza, SUM(COALESCE(p.Scrap, 0)) as Scrap, SUM(COALESCE(p.Rework, 0)) as RT FROM PROD_M_01 p JOIN CELL c ON p.CellId = c.CellId LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Year = {anio} AND p.Month = {mes} GROUP BY c.Name, pr.Code"
 
         df_piezas = pd.read_sql(q_piezas, conexion).fillna(0)
         df_trend = pd.read_sql(q_trend_piezas, conexion).fillna(0)
@@ -272,16 +257,15 @@ def crear_pdf_informe_productivo(area, label_reporte, df_trend, df_piezas, mes_s
 # ==========================================
 # 5. INTERFAZ Y LÓGICA DE STREAMLIT
 # ==========================================
-st.title("🏭 Generador de Reportes Productivos - FAMMA")
+st.title("🏭 Generador de Reportes Productivos - FUMISCOR")
 st.markdown("Selecciona los parámetros para extraer los datos de Wiidem y generar los PDFs.")
 
-# Creamos un formulario en la barra lateral (o principal) para los parámetros
+# Creamos un formulario en la barra lateral
 with st.sidebar:
     st.header("Parámetros del Reporte")
     mes = st.number_input("Mes", min_value=1, max_value=12, value=8)
     anio = st.number_input("Año", min_value=2000, max_value=2100, value=2026)
     hs_rt_manual = st.number_input("Horas de Re-trabajo (Estampado)", min_value=0.0, value=57.0, step=1.0)
-    ignorar_piezas_h = st.checkbox("Ignorar Piezas del Proyecto H", value=False)
     
     generar_btn = st.button("Generar Reportes", type="primary")
 
@@ -289,19 +273,18 @@ with st.sidebar:
 if generar_btn:
     label = f"{mes}/{anio}"
     
-    with st.spinner("Descargando configuración y consultando Wiidem..."):
+    with st.spinner("Consultando Wiidem y procesando datos..."):
         fecha_ini = pd.to_datetime(f"{anio}-{mes}-01")
         fecha_fin = pd.to_datetime(f"{anio}-{mes}-{calendar.monthrange(anio, mes)[1]}")
         
-        lista_excluir = get_piezas_h() if ignorar_piezas_h else []
-        df_t, df_p = fetch_data_from_db(fecha_ini, fecha_fin, mes, anio, lista_piezas_h=lista_excluir)
+        # Eliminada la lista de exclusión de piezas H
+        df_t, df_p = fetch_data_from_db(fecha_ini, fecha_fin, mes, anio)
         
     if not df_t.empty:
         st.success("✅ Datos extraídos correctamente. Creando archivos PDF...")
         
         col1, col2 = st.columns(2)
         
-        # Generar y mostrar botón para Estampado
         with col1:
             with st.spinner("Renderizando PDF de Estampado..."):
                 pdf_est = crear_pdf_informe_productivo("ESTAMPADO", label, df_t, df_p, mes, anio, hs_rt_manual)
@@ -313,7 +296,6 @@ if generar_btn:
                 use_container_width=True
             )
             
-        # Generar y mostrar botón para Soldadura
         with col2:
             with st.spinner("Renderizando PDF de Soldadura..."):
                 pdf_sol = crear_pdf_informe_productivo("SOLDADURA", label, df_t, df_p, mes, anio, hs_rt_manual)
