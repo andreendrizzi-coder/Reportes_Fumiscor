@@ -7,6 +7,7 @@ import os
 import calendar
 import warnings
 from fpdf import FPDF
+from datetime import datetime
 
 warnings.filterwarnings('ignore')
 
@@ -115,7 +116,6 @@ def save_chart_mpl(fig):
 # ==========================================
 def fetch_data_from_db(fecha_ini, fecha_fin, mes, anio):
     try:
-        # Se conecta usando los secrets configurados en Streamlit
         conexion = pymssql.connect(
             server=st.secrets['WIIDEM_SERVER'],
             user=st.secrets['WIIDEM_USER'],
@@ -123,8 +123,6 @@ def fetch_data_from_db(fecha_ini, fecha_fin, mes, anio):
             database=st.secrets['WIIDEM_DB'],
             login_timeout=15
         )
-        
-        # Sin filtro de piezas H, usamos M03 directamente
         q_trend_piezas = f"SELECT p.Month, c.Name as Máquina, SUM(COALESCE(p.Good, 0)) as Buenas, SUM(COALESCE(p.Rework, 0)) as Retrabajo, SUM(COALESCE(p.Scrap, 0)) as Observadas, SUM(COALESCE(p.Good, 0) + COALESCE(p.Rework, 0) + COALESCE(p.Scrap, 0)) as Totales FROM PROD_M_03 p JOIN CELL c ON p.CellId = c.CellId WHERE p.Year = {anio} AND p.Month <= {mes} GROUP BY p.Month, c.Name"
         q_piezas = f"SELECT c.Name as Máquina, COALESCE(pr.Code, 'S/C') as Pieza, SUM(COALESCE(p.Scrap, 0)) as Scrap, SUM(COALESCE(p.Rework, 0)) as RT FROM PROD_M_01 p JOIN CELL c ON p.CellId = c.CellId LEFT JOIN PRODUCT pr ON p.ProductId = pr.ProductId WHERE p.Year = {anio} AND p.Month = {mes} GROUP BY c.Name, pr.Code"
 
@@ -257,19 +255,35 @@ def crear_pdf_informe_productivo(area, label_reporte, df_trend, df_piezas, mes_s
 # ==========================================
 # 5. INTERFAZ Y LÓGICA DE STREAMLIT
 # ==========================================
+
+# Variables de sesión para guardar los PDFs y que no desaparezcan los botones
+if 'pdf_est' not in st.session_state:
+    st.session_state.pdf_est = None
+if 'pdf_sol' not in st.session_state:
+    st.session_state.pdf_sol = None
+if 'last_mes' not in st.session_state:
+    st.session_state.last_mes = None
+if 'last_anio' not in st.session_state:
+    st.session_state.last_anio = None
+
 st.title("🏭 Generador de Reportes Productivos - FUMISCOR")
 st.markdown("Selecciona los parámetros para extraer los datos de Wiidem y generar los PDFs.")
+
+# Calculamos fecha actual para usar por defecto
+hoy = datetime.now()
+mes_actual = hoy.month
+anio_actual = hoy.year
 
 # Creamos un formulario en la barra lateral
 with st.sidebar:
     st.header("Parámetros del Reporte")
-    mes = st.number_input("Mes", min_value=1, max_value=12, value=8)
-    anio = st.number_input("Año", min_value=2000, max_value=2100, value=2026)
-    hs_rt_manual = st.number_input("Horas de Re-trabajo (Estampado)", min_value=0.0, value=57.0, step=1.0)
+    mes = st.number_input("Mes", min_value=1, max_value=12, value=mes_actual)
+    anio = st.number_input("Año", min_value=2000, max_value=2100, value=anio_actual)
+    hs_rt_manual = st.number_input("Horas de Re-trabajo (Estampado)", min_value=0.0, value=0.0, step=1.0)
     
     generar_btn = st.button("Generar Reportes", type="primary")
 
-# Lógica al presionar el botón
+# Lógica al presionar el botón Generar
 if generar_btn:
     label = f"{mes}/{anio}"
     
@@ -277,34 +291,43 @@ if generar_btn:
         fecha_ini = pd.to_datetime(f"{anio}-{mes}-01")
         fecha_fin = pd.to_datetime(f"{anio}-{mes}-{calendar.monthrange(anio, mes)[1]}")
         
-        # Eliminada la lista de exclusión de piezas H
         df_t, df_p = fetch_data_from_db(fecha_ini, fecha_fin, mes, anio)
         
     if not df_t.empty:
-        st.success("✅ Datos extraídos correctamente. Creando archivos PDF...")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            with st.spinner("Renderizando PDF de Estampado..."):
-                pdf_est = crear_pdf_informe_productivo("ESTAMPADO", label, df_t, df_p, mes, anio, hs_rt_manual)
-            st.download_button(
-                label="📄 Descargar Reporte ESTAMPADO",
-                data=pdf_est,
-                file_name=f"FUMISCOR_PROD_ESTAMPADO_{mes}_{anio}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+        # Generamos y guardamos en session_state para que persistan
+        with st.spinner("Renderizando PDF de Estampado..."):
+            st.session_state.pdf_est = crear_pdf_informe_productivo("ESTAMPADO", label, df_t, df_p, mes, anio, hs_rt_manual)
             
-        with col2:
-            with st.spinner("Renderizando PDF de Soldadura..."):
-                pdf_sol = crear_pdf_informe_productivo("SOLDADURA", label, df_t, df_p, mes, anio, hs_rt_manual)
-            st.download_button(
-                label="📄 Descargar Reporte SOLDADURA",
-                data=pdf_sol,
-                file_name=f"FUMISCOR_PROD_SOLDADURA_{mes}_{anio}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+        with st.spinner("Renderizando PDF de Soldadura..."):
+            st.session_state.pdf_sol = crear_pdf_informe_productivo("SOLDADURA", label, df_t, df_p, mes, anio, hs_rt_manual)
+            
+        st.session_state.last_mes = mes
+        st.session_state.last_anio = anio
     else:
         st.error("⚠️ No se encontraron datos para ese mes o falló la conexión a Wiidem.")
+        # Limpiamos el estado si falla
+        st.session_state.pdf_est = None
+        st.session_state.pdf_sol = None
+
+# Mostrar botones de descarga si los PDFs están en memoria (ya no desaparecerán al hacer clic)
+if st.session_state.pdf_est is not None and st.session_state.pdf_sol is not None:
+    st.success("✅ Datos extraídos correctamente. Archivos PDF listos para descargar:")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📄 Descargar Reporte ESTAMPADO",
+            data=st.session_state.pdf_est,
+            file_name=f"FUMISCOR_PROD_ESTAMPADO_{st.session_state.last_mes}_{st.session_state.last_anio}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+        
+    with col2:
+        st.download_button(
+            label="📄 Descargar Reporte SOLDADURA",
+            data=st.session_state.pdf_sol,
+            file_name=f"FUMISCOR_PROD_SOLDADURA_{st.session_state.last_mes}_{st.session_state.last_anio}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
